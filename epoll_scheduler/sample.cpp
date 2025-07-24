@@ -96,7 +96,7 @@ struct AsyncReadAwaiter {
         sched.register_io(fd, h); 
     }
 #else 
-    bool await_ready()  { 
+    bool await_ready() const { 
         return false;
     }
 
