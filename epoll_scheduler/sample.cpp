@@ -162,9 +162,13 @@ struct AsyncReadAwaiter {
                 return std::move(buffer);
             }
 
+            if (errno != EAGAIN) {
                 std::stringstream ss;
                 ss << "read failed, error " << errno; 
                 throw std::runtime_error(ss.str());
+            }
+
+            n = 0; 
         }
 
         buffer.resize(n + len);
