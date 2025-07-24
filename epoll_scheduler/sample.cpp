@@ -76,6 +76,7 @@ struct AsyncReadAwaiter {
     AsyncReadAwaiter(EpollScheduler& s, int file_fd, size_t buf_size) 
         : sched(s), fd(file_fd), len(0), buffer(buf_size, '\0') { }
 
+#ifdef PREREAD_IN_AWAIT_READY
     bool await_ready()  { 
         len = 0; 
         ssize_t n = read(fd, buffer.data(), buffer.size());
@@ -94,6 +95,27 @@ struct AsyncReadAwaiter {
     void await_suspend(std::coroutine_handle<> h) {
         sched.register_io(fd, h); 
     }
+#else 
+    bool await_ready()  { 
+        return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> h) {
+        len = 0; 
+        ssize_t n = read(fd, buffer.data(), buffer.size());
+        if (n > 0) { 
+            len = n; 
+            return false; 
+        } else if (n == 0 || (n == -1 && errno == EAGAIN)) {
+            sched.register_io(fd, h); 
+            return true; 
+        } else {
+            std::stringstream ss;
+            ss << "pre read failed, error " << errno; 
+            throw std::runtime_error(ss.str());
+        }
+    }
+#endif
 
     std::string await_resume() {
         ssize_t n = read(fd, buffer.data() + len, buffer.size() - len);
