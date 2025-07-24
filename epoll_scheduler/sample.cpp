@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
+#include <signal.h>
+#include <sys/signalfd.h>
 
 #define MAX_EVENTS 10
 
@@ -23,18 +25,46 @@ struct Task {
 class EpollScheduler {
 private:
     int epoll_fd;
+    int signal_fd; 
     std::unordered_map<int, std::coroutine_handle<>> io_handles;
 public:
-    EpollScheduler() {
+    EpollScheduler(int signum) {
         epoll_fd = epoll_create(MAX_EVENTS);
         if (epoll_fd == -1) {
             std::stringstream ss;
             ss << "epoll_create failed, error " << errno; 
             throw std::runtime_error(ss.str());
         }
+
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, signum);
+        sigprocmask(SIG_BLOCK, &mask, NULL);
+        signal_fd = signalfd(-1, &mask, SFD_NONBLOCK);
+        if (signal_fd == -1) { 
+            std::stringstream ss;
+            ss << "signalfd failed, error " << errno; 
+            throw std::runtime_error(ss.str());
+        }
+
+        struct epoll_event ev;
+        ev.events = EPOLLIN;
+        ev.data.fd = signal_fd;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, signal_fd, &ev) == -1) {
+            std::stringstream ss;
+            ss << "epoll_ctl failed, error " << errno; 
+            throw std::runtime_error(ss.str());
+        }
+
+        std::cout << "register signal " << signum << " as fd " << signal_fd << std::endl; 
     }
 
     ~EpollScheduler() {
+        for(auto handle : io_handles) {
+            std::cout << "coroutine destroy" << std::endl; 
+            handle.second.destroy(); 
+        }
+        close(signal_fd); 
         close(epoll_fd);
     }
 
@@ -59,6 +89,13 @@ public:
             int n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
             for (int i = 0; i < n; ++i) {
                 int ready_fd = events[i].data.fd;
+                if (ready_fd == signal_fd) {
+                    struct signalfd_siginfo fdsi = { 0 };
+                    read(signal_fd, &fdsi, sizeof(fdsi));
+                    std::cout << "signal " << fdsi.ssi_signo << " detected, exit..." << std::endl; 
+                    return; 
+                }
+
                 if (auto it = io_handles.find(ready_fd); it != io_handles.end()) {
                     it->second.resume(); 
                 }
@@ -125,9 +162,9 @@ struct AsyncReadAwaiter {
                 return std::move(buffer);
             }
 
-            std::stringstream ss;
-            ss << "read failed, error " << errno; 
-            throw std::runtime_error(ss.str());
+                std::stringstream ss;
+                ss << "read failed, error " << errno; 
+                throw std::runtime_error(ss.str());
         }
 
         buffer.resize(n + len);
@@ -164,7 +201,7 @@ int main(int argc, char* argv[]) {
         return 1; 
     }
 
-    EpollScheduler scheduler;
+    EpollScheduler scheduler(SIGINT);
     async_read_file(scheduler, argv[1]);
     async_read_file(scheduler, argv[2]);
     scheduler.run();
