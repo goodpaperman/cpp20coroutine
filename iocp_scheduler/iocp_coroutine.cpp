@@ -1,3 +1,5 @@
+﻿// iocp_coroutine.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
+//
 #include <coroutine>
 #include <unordered_map>
 #include <windows.h>
@@ -39,7 +41,9 @@ public:
             io_handles[file_handle] = handle;
 
             if (CreateIoCompletionPort(file_handle, iocp_handle, (ULONG_PTR)file_handle, 0) == NULL) {
-                throw std::runtime_error("CreateIoCompletionPort failed to associate file handle");
+                std::string errmsg = "CreateIoCompletionPort failed to associate file handle"; 
+                std::cerr << errmsg << std::endl; 
+                throw std::runtime_error(errmsg);
             }
         }
     }
@@ -67,16 +71,18 @@ public:
     }
 };
 
+
 struct AsyncReadAwaiter {
     IocpScheduler& sched;
     HANDLE file_handle;
     std::unique_ptr<char[]> buffer;
     DWORD buffer_size;
+    LARGE_INTEGER &offset; 
     OVERLAPPED overlapped;
     DWORD bytes_read;
 
-    AsyncReadAwaiter(IocpScheduler& s, HANDLE file, DWORD size)
-        : sched(s), file_handle(file), buffer_size(size), bytes_read(0) {
+    AsyncReadAwaiter(IocpScheduler& s, HANDLE file, LARGE_INTEGER &off, DWORD size)
+        : sched(s), file_handle(file), buffer_size(size), offset(off), bytes_read(0) {
         buffer = std::make_unique<char[]>(size);
         ZeroMemory(&overlapped, sizeof(OVERLAPPED));
     }
@@ -87,12 +93,16 @@ struct AsyncReadAwaiter {
 
     void await_suspend(std::coroutine_handle<> h) {
         sched.register_io(file_handle, h);
-        
+
+        overlapped.Offset = offset.LowPart;
+        overlapped.OffsetHigh = offset.HighPart;
+        std::cout << "ReadFile from " << offset.QuadPart << std::endl;
         if (!ReadFile(file_handle, buffer.get(), buffer_size, &bytes_read, &overlapped)) {
             DWORD error = GetLastError();
             if (error != ERROR_IO_PENDING) {
                 std::stringstream ss;
                 ss << "ReadFile failed, error " << error;
+                std::cerr << ss.str() << std::endl; 
                 throw std::runtime_error(ss.str());
             }
         }
@@ -102,11 +112,18 @@ struct AsyncReadAwaiter {
         DWORD bytes_transferred = 0;
         if (!GetOverlappedResult(file_handle, &overlapped, &bytes_transferred, FALSE)) {
             DWORD error = GetLastError();
-            std::stringstream ss;
-            ss << "GetOverlappedResult failed, error " << error;
-            throw std::runtime_error(ss.str());
+            if (error != ERROR_HANDLE_EOF) {
+                std::stringstream ss;
+                ss << "GetOverlappedResult failed, error " << error;
+                std::cerr << ss.str() << std::endl;
+                throw std::runtime_error(ss.str());
+            }
+            else {
+                return ""; 
+            }
         }
 
+        offset.QuadPart += bytes_transferred; 
         return std::string(buffer.get(), bytes_transferred);
     }
 };
@@ -124,11 +141,13 @@ Task async_read_file(IocpScheduler& sched, const char* path) {
     if (file_handle == INVALID_HANDLE_VALUE) {
         std::stringstream ss;
         ss << "CreateFile failed, error " << GetLastError();
+        std::cerr << ss.str() << std::endl; 
         throw std::runtime_error(ss.str());
     }
 
+    LARGE_INTEGER offset = { 0 };
     while (true) {
-        auto data = co_await AsyncReadAwaiter(sched, file_handle, 4096);
+        auto data = co_await AsyncReadAwaiter(sched, file_handle, offset, 4096);
         std::cout << "Read " << data.size() << " bytes\n";
         if (data.size() == 0) {
             break;
@@ -149,3 +168,5 @@ int main(int argc, char* argv[]) {
     scheduler.run();
     return 0;
 }
+
+
