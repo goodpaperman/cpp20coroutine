@@ -8,6 +8,7 @@
 #include <iostream>
 #include <sstream>
 #include <memory>
+#include <signal.h>
 
 struct Task {
     struct promise_type {
@@ -61,13 +62,22 @@ public:
                 &overlapped,
                 INFINITE);
 
-            if (completion_key != 0) {
+            if (completion_key == 0) {
+                std::cout << "IOCP ready to quit" << std::endl; 
+                break; 
+            }
+            else {
                 HANDLE ready_handle = (HANDLE)completion_key;
                 if (auto it = io_handles.find(ready_handle); it != io_handles.end()) {
                     it->second.resume();
                 }
             }
         }
+    }
+
+    void exit(int signo) {
+        std::cout << "caught signal " << signo << ", prepare to quit!" << std::endl; 
+        PostQueuedCompletionStatus(iocp_handle, 0, (ULONG_PTR)0, NULL);
     }
 };
 
@@ -91,12 +101,12 @@ struct AsyncReadAwaiter {
         return false;
     }
 
-    void await_suspend(std::coroutine_handle<> h) {
+    bool await_suspend(std::coroutine_handle<> h) {
         sched.register_io(file_handle, h);
 
         overlapped.Offset = offset.LowPart;
         overlapped.OffsetHigh = offset.HighPart;
-        std::cout << "ReadFile from " << offset.QuadPart << std::endl;
+        //std::cout << "ReadFile from " << offset.QuadPart << std::endl;
         if (!ReadFile(file_handle, buffer.get(), buffer_size, &bytes_read, &overlapped)) {
             DWORD error = GetLastError();
             if (error != ERROR_IO_PENDING) {
@@ -106,20 +116,30 @@ struct AsyncReadAwaiter {
                 throw std::runtime_error(ss.str());
             }
         }
+        else {
+            // if immediately success, not hangup
+            std::cout << "immediately success, read = " << bytes_read << std::endl; 
+        }
+        return bytes_read > 0 ? false : true;
     }
 
     std::string await_resume() {
         DWORD bytes_transferred = 0;
-        if (!GetOverlappedResult(file_handle, &overlapped, &bytes_transferred, FALSE)) {
-            DWORD error = GetLastError();
-            if (error != ERROR_HANDLE_EOF) {
-                std::stringstream ss;
-                ss << "GetOverlappedResult failed, error " << error;
-                std::cerr << ss.str() << std::endl;
-                throw std::runtime_error(ss.str());
-            }
-            else {
-                return ""; 
+        if (bytes_read > 0) {
+            bytes_transferred = bytes_read;
+        }
+        else {
+            if (!GetOverlappedResult(file_handle, &overlapped, &bytes_transferred, FALSE)) {
+                DWORD error = GetLastError();
+                if (error != ERROR_HANDLE_EOF) {
+                    std::stringstream ss;
+                    ss << "GetOverlappedResult failed, error " << error;
+                    std::cerr << ss.str() << std::endl;
+                    throw std::runtime_error(ss.str());
+                }
+                else {
+                    return "";
+                }
             }
         }
 
@@ -147,8 +167,8 @@ Task async_read_file(IocpScheduler& sched, const char* path) {
 
     LARGE_INTEGER offset = { 0 };
     while (true) {
-        auto data = co_await AsyncReadAwaiter(sched, file_handle, offset, 4096);
-        std::cout << "Read " << data.size() << " bytes\n";
+        auto data = co_await AsyncReadAwaiter(sched, file_handle, offset, 1024);
+        std::cout << "Read [" << file_handle << "] " << data.size() << " bytes" << std::endl;
         if (data.size() == 0) {
             break;
         }
@@ -157,15 +177,22 @@ Task async_read_file(IocpScheduler& sched, const char* path) {
     CloseHandle(file_handle);
 }
 
+IocpScheduler g_scheduler;
+
+void on_user_exit(int signo) {
+    g_scheduler.exit(signo); 
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cout << "Usage: sample file_path" << std::endl;
+        std::cout << "Usage: sample file" << std::endl;
         return 1;
     }
 
-    IocpScheduler scheduler;
-    async_read_file(scheduler, argv[1]);
-    scheduler.run();
+    signal(SIGINT, on_user_exit); 
+    async_read_file(g_scheduler, argv[1]);
+    // async_read_file(scheduler, argv[2]);
+    g_scheduler.run();
     return 0;
 }
 
