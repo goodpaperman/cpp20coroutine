@@ -34,6 +34,10 @@ public:
     }
 
     ~IocpScheduler() {
+        for(auto handle : io_handles) {
+            std::cout << "coroutine destroy" << std::endl;
+            handle.second.destroy();
+        }
         CloseHandle(iocp_handle);
     }
 
